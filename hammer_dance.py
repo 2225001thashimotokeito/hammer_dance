@@ -13,14 +13,16 @@ R' = γI
 S: 感受性者数 (Susceptible)
 I: 感染者数 (Infected)
 R: 回復者数 (Recovered)
-β: 感染率
+β: 感染率 (β = Rt × γ)
 γ: 回復率
+Rt: 実効再生産数 (Rt = R0 × S/N)
+R0: 基本再生産数
 """
 
 import math
 
 class HammerDanceModel:
-    def __init__(self, N, I0, R0, beta_hammer, beta_dance, gamma):
+    def __init__(self, N, I0, R0, R0_hammer, R0_dance, gamma):
         """
         ハンマー＆ダンスモデルの初期化
         
@@ -28,24 +30,28 @@ class HammerDanceModel:
         N: 総人口
         I0: 初期感染者数
         R0: 初期回復者数
-        beta_hammer: ハンマー期間の感染率（低い値）
-        beta_dance: ダンス期間の感染率（高い値）
+        R0_hammer: ハンマー期間の基本再生産数（低い値）
+        R0_dance: ダンス期間の基本再生産数（高い値）
         gamma: 回復率
+        
+        β値は以下の関係から計算される：
+        β = Rt × γ, Rt = R0 × S/N
         """
         self.N = N
         self.S0 = N - I0 - R0
         self.I0 = I0
         self.R0 = R0
-        self.beta_hammer = beta_hammer
-        self.beta_dance = beta_dance
+        self.R0_hammer = R0_hammer
+        self.R0_dance = R0_dance
         self.gamma = gamma
         
-    def sir_derivatives(self, S, I, R, beta):
+    def sir_derivatives(self, S, I, R, R0_base, gamma):
         """
         SIRモデルの微分方程式（正規化版）
+        β = Rt × γ, Rt = R0 × S/N を使用
         
-        s' = -βsi (s = S/N, i = I/N, r = R/N)
-        i' = βsi - γi
+        s' = -βsi = -Rt×γ×si = -R0×(S/N)×γ×si
+        i' = βsi - γi = R0×(S/N)×γ×si - γi
         r' = γi
         """
         # 正規化された変数での計算
@@ -53,41 +59,50 @@ class HammerDanceModel:
         i = I / self.N
         r = R / self.N
         
+        # Rt = R0 × S/N の計算
+        Rt = R0_base * s
+        
+        # β = Rt × γ の計算
+        beta = Rt * gamma
+        
         dsdt = -beta * s * i
-        didt = beta * s * i - self.gamma * i
-        drdt = self.gamma * i
+        didt = beta * s * i - gamma * i
+        drdt = gamma * i
         
         # 実数値に戻す
         dSdt = dsdt * self.N
         dIdt = didt * self.N
         dRdt = drdt * self.N
         
-        return dSdt, dIdt, dRdt
+        # デバッグ用にRt, beta値も返す
+        return dSdt, dIdt, dRdt, Rt, beta
     
-    def euler_step(self, S, I, R, beta, dt):
+    def euler_step(self, S, I, R, R0_base, gamma, dt):
         """
         オイラー法による1ステップ計算
         """
-        dSdt, dIdt, dRdt = self.sir_derivatives(S, I, R, beta)
+        dSdt, dIdt, dRdt, Rt, beta = self.sir_derivatives(S, I, R, R0_base, gamma)
         S_new = S + dSdt * dt
         I_new = I + dIdt * dt
         R_new = R + dRdt * dt
         return S_new, I_new, R_new
     
-    def simulate_dynamic_hammer_dance(self, max_days, hammer_threshold, dance_threshold,
-                                     hammer_duration, dance_duration, dt):
+    def simulate_dynamic_hammer_dance(self, max_days, hammer_threshold_initial, hammer_threshold_slope, dance_threshold,
+                                     hammer_duration, dance_duration, dt, 
+                                     parameter_changes=None):
         """
         動的ハンマー＆ダンス戦略のシミュレーション
-        感染者数が閾値を超えたときにハンマー期間を開始
-        感染者数が下限閾値を下回ったときにダンス期間に切り替え
+        感染者数が時間依存の閾値を超えたときにハンマー期間を開始
         
         Parameters:
         max_days: 最大シミュレーション日数
-        hammer_threshold: ハンマー期間開始の感染者数閾値（上限）
+        hammer_threshold_initial: ハンマー期間開始の初期閾値
+        hammer_threshold_slope: ハンマー閾値の一次関数的増加率（人/日）
         dance_threshold: ダンス期間切り替えの感染者数閾値（下限）
         hammer_duration: ハンマー期間の最大日数
         dance_duration: ダンス期間の日数（参考値）
         dt: 時間刻み
+        parameter_changes: パラメータの段階的変更設定 [(day, R0_hammer, R0_dance, gamma), ...]
         """
         steps = int(max_days / dt)
         
@@ -108,7 +123,31 @@ class HammerDanceModel:
         phase_start_time = 0
         phase_duration = 0
         
+        # パラメータ変更の追跡用
+        parameter_change_logged = set()
+        
         for step in range(steps):
+            # 時間依存のパラメータを決定
+            current_R0_hammer = self.R0_hammer
+            current_R0_dance = self.R0_dance
+            current_gamma = self.gamma
+            
+            if parameter_changes:
+                for change_day, R0_h, R0_d, gamma_new in parameter_changes:
+                    if t >= change_day:
+                        current_R0_hammer = R0_h
+                        current_R0_dance = R0_d
+                        current_gamma = gamma_new
+                        
+                        # パラメータ変更のログ出力（初回のみ）
+                        if change_day not in parameter_change_logged and abs(t - change_day) < dt:
+                            parameter_change_logged.add(change_day)
+                            print(f"時刻 {t:.1f}日: パラメータ変更")
+                            print(f"  R0値 - ハンマー: {current_R0_hammer:.6f}, ダンス: {current_R0_dance:.6f}")
+                            print(f"  回復率γ: {current_gamma:.6f}")
+                    else:
+                        break
+            
             t_list.append(t)
             S_list.append(S)
             I_list.append(I)
@@ -117,28 +156,39 @@ class HammerDanceModel:
             
             # フェーズ切り替えの判定
             if current_phase == 'dance':
-                # ダンス期間中：感染者数が上限閾値を超えたらハンマー期間に切り替え
-                if I > hammer_threshold:
+                # 時間依存のハンマー閾値を計算
+                current_hammer_threshold = hammer_threshold_initial + hammer_threshold_slope * t
+                
+                # ダンス期間中：感染者数が時間依存の上限閾値を超えたらハンマー期間に切り替え
+                if I > current_hammer_threshold:
                     current_phase = 'hammer'
                     phase_start_time = t
                     transition_points.append((t, 'dance_to_hammer', I))
-                    print(f"時刻 {t:.1f}日: 感染者数 {I:.1f}人 -> ハンマー期間開始")
+                    print(f"時刻 {t:.1f}日: 感染者数 {I:.1f}人 > 閾値 {current_hammer_threshold:.1f}人 -> ハンマー期間開始")
                 
                 # ダンス期間で微分方程式を解く
-                S, I, R = self.euler_step(S, I, R, self.beta_dance, dt)
+                S, I, R = self.euler_step(S, I, R, current_R0_dance, current_gamma, dt)
                 
             elif current_phase == 'hammer':
                 # ハンマー期間中の切り替え判定
+                time_in_hammer = t - phase_start_time
                 
                 # 感染者数が下限閾値を下回った場合は即座にダンス期間に切り替え
                 if I < dance_threshold:
                     current_phase = 'dance'
                     phase_start_time = t
                     transition_points.append((t, 'hammer_to_dance_threshold', I))
-                    print(f"時刻 {t:.1f}日: 感染者数 {I:.1f}人 -> ダンス期間切り替え（閾値到達）")
+                    print(f"時刻 {t:.1f}日: 感染者数 {I:.1f}人 < 閾値 {dance_threshold:.1f}人 -> ダンス期間切り替え（閾値到達）")
+                
+                # 90日経過した場合はダンス期間に切り替え（コメントアウト）
+                # if time_in_hammer >= 90:
+                #     current_phase = 'dance'
+                #     phase_start_time = t
+                #     transition_points.append((t, 'hammer_to_dance_timeout', I))
+                #     print(f"時刻 {t:.1f}日: ハンマー期間終了（90日経過）-> ダンス期間開始 (感染者数: {I:.1f}人)")
                 
                 # ハンマー期間で微分方程式を解く
-                S, I, R = self.euler_step(S, I, R, self.beta_hammer, dt)
+                S, I, R = self.euler_step(S, I, R, current_R0_hammer, current_gamma, dt)
             
             t += dt
             
@@ -156,9 +206,9 @@ class HammerDanceModel:
         print("\n=== ハンマー＆ダンス戦略シミュレーション結果 ===")
         print(f"総人口: {self.N}人")
         print(f"初期感染者: {self.I0}人")
-        print(f"ハンマー期間感染率: {self.beta_hammer}")
-        print(f"ダンス期間感染率: {self.beta_dance}")
-        print(f"回復率: {self.gamma}")
+        print(f"ハンマー期 R0: {self.R0_hammer}")
+        print(f"ダンス期 R0: {self.R0_dance}")
+        print(f"回復率 γ: {self.gamma}")
         print()
         
         # 各サイクルの結果表示
@@ -270,9 +320,9 @@ class HammerDanceModel:
         print("\n凡例: H=ハンマー期間, D=ダンス期間")
         print(f"感染者数範囲: {min_I:.1f} - {max_I:.1f}人")
     
-    def create_html_graph(self, t, S, I, R, phases, hammer_threshold, dance_threshold, filename="hammer_dance_graph.html"):
+    def create_html_graph(self, t, S, I, R, phases, hammer_threshold_initial, hammer_threshold_slope, dance_threshold, filename="hammer_dance_graph.html"):
         """
-        HTML形式のグラフを生成
+        HTML形式のグラフを生成（動的ハンマー閾値対応）
         """
         try:
             html_content = f"""<!DOCTYPE html>
@@ -292,13 +342,14 @@ class HammerDanceModel:
     
     <div class="control-info">
         <h3>動的制御ルール</h3>
-        <p>🔨 <strong>ハンマー期間開始</strong>: 感染者数が{hammer_threshold}人を超えたとき</p>
-        <p>💃 <strong>ダンス期間切り替え</strong>: 感染者数が{dance_threshold}人を下回ったとき（または最大30日経過）</p>
+        <p>🔨 <strong>ハンマー期間開始</strong>: 感染者数が時間依存閾値を超えたとき</p>
+        <p>📈 <strong>閾値式</strong>: {hammer_threshold_initial} + {hammer_threshold_slope} × 時間（日）</p>
+    <p>💃 <strong>ダンス期間切り替え</strong>: 感染者数が閾値を下回ったときに切り替え</p>
     </div>
     
     <div class="stats">
-        <h3>パラメータ設定</h3>
-        <p>総人口: {self.N}人 | 初期感染者: {self.I0}人 | ハンマー期間感染率: {self.beta_hammer} | ダンス期間感染率: {self.beta_dance} | 回復率: {self.gamma}</p>
+    <h3>パラメータ設定</h3>
+    <p>総人口: {self.N}人 | 初期感染者: {self.I0}人 | ハンマー期 R0: {self.R0_hammer} | ダンス期 R0: {self.R0_dance} | 回復率 γ: {self.gamma}</p>
     </div>
     
     <div class="graph-container">
@@ -357,13 +408,15 @@ class HammerDanceModel:
             line: {{color: 'red', width: 3}}
         }};
         
-        // ハンマー開始閾値ライン
+        // ハンマー開始閾値ライン（動的）
+        var hammer_threshold_t = {t};
+        var hammer_threshold_y = hammer_threshold_t.map(time => {hammer_threshold_initial} + {hammer_threshold_slope} * time);
         var trace5 = {{
-            x: [0, Math.max(...{t})],
-            y: [{hammer_threshold}, {hammer_threshold}],
+            x: hammer_threshold_t,
+            y: hammer_threshold_y,
             type: 'scatter',
             mode: 'lines',
-            name: 'ハンマー開始閾値 ({hammer_threshold}人)',
+            name: 'ハンマー開始閾値（動的）',
             line: {{color: 'orange', width: 2, dash: 'dash'}}
         }};
         
@@ -427,32 +480,43 @@ def main():
     メイン実行関数
     """
     # 設定値を変数として定義
-    hammer_threshold_val = 194323
-    dance_threshold_val = 10000
+    hammer_threshold_initial = 2000    # 初期ハンマー閾値（人）
+    hammer_threshold_slope = 200       # ハンマー閾値の増加率（人/日）
+    dance_threshold_val = 2000
+    
+    # パラメータの段階的変更設定 [(日数, R0_hammer, R0_dance, gamma), ...]
+    parameter_changes = [
+        (500, 0.8, 7.25, 0.1),    # 500日経過時：γも0.15に変更
+        (800, 1.42857, 12.142856, 0.142857)    # 800日経過時：γも0.2に変更
+    ]
     
     print("ハンマー＆ダンス戦略シミュレーション開始...")
-    print(f"動的制御：感染者数が{hammer_threshold_val}人を超えたときにハンマー期間開始")
-    print(f"　　　　　感染者数が{dance_threshold_val}人を下回ったときにダンス期間切り替え")
+    print(f"動的制御：ハンマー閾値 = {hammer_threshold_initial} + {hammer_threshold_slope} × 日数")
+    print(f"　　　　　ハンマー期間は感染者数が閾値を下回ったときにダンス期間切り替え")
+    print(f"パラメータ変更：500日後と800日後にR0値とγ値を段階的に変更")
+    print(f"β値は β = Rt × γ, Rt = R0 × S/N の関係で動的計算")
     
     # モデルのパラメータ設定
     model = HammerDanceModel(
         N=125000000,           # 総人口
-        I0=194323,            # 初期感染者数
-        R0=20000000,             # 初期回復者数
-        beta_hammer=0.142857,  # ハンマー期間の感染率（厳格な対策）
-        beta_dance=1.428571,   # ダンス期間の感染率（緩和された対策）
-        gamma=0.142857         # 回復率
+        I0=2000,            # 初期感染者数
+        R0=1000,             # 初期回復者数
+        R0_hammer=0.6,  # ハンマー期間の基本再生産数（厳格な対策）
+        R0_dance=2.9,   # ダンス期間の基本再生産数（緩和された対策）
+        gamma=0.1          # 回復率
     )
     
     # 動的ハンマー＆ダンス戦略のシミュレーション実行
     print("\n=== 動的ハンマー＆ダンス戦略 ===")
     t, S, I, R, phases, transitions = model.simulate_dynamic_hammer_dance(
-        max_days=1095,                    # 最大1095日
-        hammer_threshold=hammer_threshold_val,  # 感染者数でハンマー期間開始
-        dance_threshold=dance_threshold_val,    # 感染者数でダンス期間切り替え
-        hammer_duration=None,            # ハンマー期間：無制限（感染者数が閾値を下回るまで継続）
-        dance_duration=None,             # ダンス期間：無制限（感染者数が閾値を超えるまで継続）
-        dt=0.1                          # 時間刻み
+        max_days=1095,                           # 最大1095日
+        hammer_threshold_initial=hammer_threshold_initial,  # 初期ハンマー閾値
+        hammer_threshold_slope=hammer_threshold_slope,      # ハンマー閾値増加率
+        dance_threshold=dance_threshold_val,     # 感染者数でダンス期間切り替え
+        hammer_duration=None,                    # ハンマー期間：無制限（感染者数が閾値を下回るまで継続）
+        dance_duration=None,                     # ダンス期間：無制限（感染者数が閾値を超えるまで継続）
+        dt=0.1,                                 # 時間刻み
+        parameter_changes=parameter_changes     # パラメータの段階的変更設定
     )
     
     # フェーズ切り替えポイントの表示
@@ -463,7 +527,7 @@ def main():
         elif transition_type == 'hammer_to_dance_threshold':
             print(f"{time:.1f}日: ハンマー→ダンス【閾値到達】 (感染者数: {infected_count:.1f}人)")
         elif transition_type == 'hammer_to_dance_timeout':
-            print(f"{time:.1f}日: ハンマー→ダンス【期間満了】 (感染者数: {infected_count:.1f}人)")
+            print(f"{time:.1f}日: ハンマー→ダンス【90日経過】 (感染者数: {infected_count:.1f}人)")
     
     # 結果の表示
     model.print_results(t, S, I, R, phases)
@@ -475,7 +539,7 @@ def main():
     model.save_csv_results(t, S, I, R, phases, "dynamic_hammer_dance_results.csv")
     
     # HTMLグラフの生成（動的版）
-    model.create_html_graph(t, S, I, R, phases, hammer_threshold_val, dance_threshold_val, "dynamic_hammer_dance_graph.html")
+    model.create_html_graph(t, S, I, R, phases, hammer_threshold_initial, hammer_threshold_slope, dance_threshold_val, "dynamic_hammer_dance_graph.html")
     
     # Excel用データの生成
     model.create_excel_data(t, S, I, R, phases, "dynamic_hammer_dance_data.txt")
